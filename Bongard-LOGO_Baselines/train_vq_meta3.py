@@ -9,6 +9,7 @@ import yaml
 
 import numpy as np
 import torch
+from torch import optim
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -20,7 +21,6 @@ import models
 import utils
 import utils.few_shot as fs
 from datasets.samplers import BongardSampler
-
 
 def main(config):
     svname = args.name
@@ -168,14 +168,13 @@ def main(config):
         timer_epoch.s()
         aves = {k: utils.Averager() for k in aves_keys}
 
-        # train
+        # meta baseline train
         model.train()
         if config.get('freeze_bn'):
             utils.freeze_bn(model)
         writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
 
         for data, label in tqdm(train_loader, desc='train', leave=False):
-
             x_shot, x_query = fs.split_shot_query(
                 data.cuda(), n_train_way, n_train_shot, n_query,
                 ep_per_batch=ep_per_batch)
@@ -183,23 +182,10 @@ def main(config):
                 n_train_way, n_query,
                 ep_per_batch=ep_per_batch).cuda()
 
-            if config['model'] == 'snail':  # only use one selected label_query
-                query_dix = random_state.randint(n_train_way * n_query)
-                label_query = label_query.view(ep_per_batch, -1)[:, query_dix]
-                x_query = x_query[:, query_dix: query_dix + 1]
-
-            if config['model'] == 'maml':  # need grad in maml
-                model.zero_grad()
-
-            (z_e, emb), logits = model(x_shot, x_query)
+            (x, recon_x, z_e, emb), logits = model(x_shot, x_query)
             
             logits = logits.view(-1, n_train_way)
-            ce_loss = F.cross_entropy(logits, label_query)
-            vq_loss = F.mse_loss(emb, z_e.detach())
-            commit_loss = F.mse_loss(z_e, emb.detach())
-            
-            #vq_coef=1, comit_coef=0.5,
-            loss = ce_loss + 1*vq_loss + 0.5*commit_loss
+            loss = F.cross_entropy(logits, label_query)
             acc = utils.compute_acc(logits, label_query)
 
             optimizer.zero_grad()
@@ -228,21 +214,11 @@ def main(config):
                 label_query = fs.make_nk_label(
                     n_way, n_query, ep_per_batch=ep_per_batch).cuda()
 
-                if config['model'] == 'snail':  # only use one randomly selected label_query
-                    query_dix = random_state.randint(n_train_way)
-                    label_query = label_query.view(ep_per_batch, -1)[:, query_dix]
-                    x_query = x_query[:, query_dix: query_dix + 1]
-
-                if config['model'] == 'maml':  # need grad in maml
-                    model.zero_grad()
-                    logits = model(x_shot, x_query, eval=True).view(-1, n_way)
+                with torch.no_grad():
+                    (x, recon_x, z_e, emb), logits = model(x_shot, x_query)
+                    logits = logits.view(-1, n_train_way)
                     loss = F.cross_entropy(logits, label_query)
                     acc = utils.compute_acc(logits, label_query)
-                else:
-                    with torch.no_grad():
-                        logits = model(x_shot, x_query, eval=True).view(-1, n_way)
-                        loss = F.cross_entropy(logits, label_query)
-                        acc = utils.compute_acc(logits, label_query)
 
                 aves[name_l].add(loss.item())
                 aves[name_a].add(acc)
@@ -258,7 +234,7 @@ def main(config):
         t_epoch = utils.time_str(timer_epoch.t())
         t_used = utils.time_str(timer_used.t())
         t_estimate = utils.time_str(timer_used.t() / epoch * max_epoch)
-        log_str = 'epoch {}, train {:.4f}|{:.4f}, val {:.4f}|{:.4f}'.format(
+        log_str = 'Meta Baseline Training Stage Epoch {}, train {:.4f}|{:.4f}, val {:.4f}|{:.4f}'.format(
             epoch, aves['tl'], aves['ta'], aves['vl'], aves['va'])
         for tval_name, _, loss_key, acc_key in tval_tuple_lst:
             log_str += ', {} {:.4f}|{:.4f}'.format(tval_name, aves[loss_key], aves[acc_key])

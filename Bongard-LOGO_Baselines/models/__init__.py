@@ -18,3 +18,5 @@ from . import cnn_baseline
 from . import wren
 from . import program_synthesis
 from . import recurrent_model
+from . import vq_meta_baseline
+from . import vq_meta_baseline2

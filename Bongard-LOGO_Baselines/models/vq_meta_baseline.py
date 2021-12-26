@@ -18,10 +18,10 @@ from .nearest_embed import NearestEmbed, NearestEmbedEMA
 class VQMetaBaseline(nn.Module):
 
     def __init__(self, encoder, encoder_args={}, method='cos',
-                 temp=10., temp_learnable=True, k=512):
+                 temp=10., temp_learnable=True, k=4096):
         super().__init__()
         self.encoder = models.make(encoder, **encoder_args)
-        self.embed = NearestEmbed(k, encoder_args.out_dim)
+        self.embed = NearestEmbed(k, encoder_args['out_dim'])
         self.method = method
 
         if temp_learnable:
@@ -36,12 +36,18 @@ class VQMetaBaseline(nn.Module):
 
         x_shot = x_shot.view(-1, *img_shape)
         x_query = x_query.view(-1, *img_shape)
-        x_tot = self.encoder(torch.cat([x_shot, x_query], dim=0))
+        z_e = self.encoder(torch.cat([x_shot, x_query], dim=0))
+        
+        #print("z_e.shape", z_e.shape)
 
         z_q, _ = self.embed(z_e, weight_sg=True)
         emb, _ = self.embed(z_e.detach())
+        #print("z_q.shape", z_q.shape)
+        #print("emb.shape", emb.shape)
 
-        x_shot, x_query = z_q[:len(x_shot)], z_q[-len(x_query):]
+        x_shot, x_query = emb[:len(x_shot)], emb[-len(x_query):]
+        #print("x_shot.shape", x_shot.shape, "x_query.shape", x_query.shape)
+        
         x_shot = x_shot.view(*shot_shape, -1)
         x_query = x_query.view(*query_shape, -1)
 
@@ -56,9 +62,11 @@ class VQMetaBaseline(nn.Module):
 
         logits = utils.compute_logits(
                 x_query, x_shot, metric=metric, temp=self.temp)  # [ep_per_batch, way * query, way]
-
+        
+        #print("logits.shape", logits.shape)
+        
         if self.training:
-            return (z_q, emb), logits
+            return (z_e, emb), logits
         else:
             return logits
 

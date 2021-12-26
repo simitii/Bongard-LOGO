@@ -9,6 +9,7 @@ import yaml
 
 import numpy as np
 import torch
+from torch import optim
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -20,7 +21,6 @@ import models
 import utils
 import utils.few_shot as fs
 from datasets.samplers import BongardSampler
-
 
 def main(config):
     svname = args.name
@@ -163,19 +163,82 @@ def main(config):
     trlog = dict()
     for k in aves_keys:
         trlog[k] = []
+        
+    vqvae_optimizer = optim.Adam(model.parameters(), lr=2e-4)
+    vqvae_scheduler = optim.lr_scheduler.StepLR(vqvae_optimizer, 10, 0.5,)
+    
+    for epoch in range(1, 10 + 1):
+        # vq vae train
+        timer_epoch.s()
+        aves = {k: utils.Averager() for k in ['loss', 'mse', 'vq', 'commitment', 'val_loss', 'val_mse', 'val_vq', 'val_commitment']}
+        
+        model.train()
+        if config.get('freeze_bn'):
+            utils.freeze_bn(model)
+
+        for data, label in tqdm(train_loader, desc='vq vae train', leave=False):
+            x_shot, x_query = fs.split_shot_query(
+                data.cuda(), n_train_way, n_train_shot, n_query,
+                ep_per_batch=ep_per_batch)
+
+            (x, recon_x, z_e, emb), logits = model(x_shot, x_query)
+            loss = model.vq_vae.loss_function(x, recon_x, z_e, emb)
+       
+          
+            optimizer.zero_grad()
+            loss.backward()
+            vqvae_optimizer.step()
+            latest_losses = model.vq_vae.latest_losses()
+            
+            aves['loss'].add(loss.item())
+            aves['mse'].add(latest_losses['mse'].item())
+            aves['vq'].add(latest_losses['vq'].item())
+            aves['commitment'].add(latest_losses['commitment'].item())
+           
+        vqvae_scheduler.step()
+        
+        # eval
+        model.eval()
+
+        np.random.seed(0)
+        for data, _ in tqdm(val_loader, desc='vq vae validation', leave=False):
+            x_shot, x_query = fs.split_shot_query(
+                data.cuda(), n_way, n_shot, n_query,
+                ep_per_batch=ep_per_batch)
+            
+            with torch.no_grad():
+                (x, recon_x, z_e, emb), logits = model(x_shot, x_query)
+                loss = model.vq_vae.loss_function(x, recon_x, z_e, emb)
+                latest_losses = model.vq_vae.latest_losses()
+
+                aves['val_loss'].add(loss.item())
+                aves['val_mse'].add(latest_losses['mse'].item())
+                aves['val_vq'].add(latest_losses['vq'].item())
+                aves['val_commitment'].add(latest_losses['commitment'].item())
+                
+        for k, v in aves.items():
+            aves[k] = v.item()
+
+        t_epoch = utils.time_str(timer_epoch.t())
+        t_used = utils.time_str(timer_used.t())
+        t_estimate = utils.time_str(timer_used.t() / epoch * max_epoch)
+        log_str =  "VQVAE Training Stage Epoch {},  ".format(epoch)
+        log_str += "Training: [loss: {:.4f}, mse: {:.4f}, vq: {:.4f}, commitment {:.4f}],  ".format(aves['loss'], aves['mse'], aves['vq'], aves['commitment'])
+        log_str += "Validation: [loss: {:.4f}, mse: {:.4f}, vq: {:.4f}, commitment {:.4f}],  ".format(aves['val_loss'], aves['val_mse'], aves['val_vq'], aves['val_commitment'])
+        log_str += '{} {}/{}'.format(t_epoch, t_used, t_estimate)
+        utils.log(log_str)
 
     for epoch in range(1, max_epoch + 1):
         timer_epoch.s()
         aves = {k: utils.Averager() for k in aves_keys}
 
-        # train
+        # meta baseline train
         model.train()
         if config.get('freeze_bn'):
             utils.freeze_bn(model)
         writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
 
         for data, label in tqdm(train_loader, desc='train', leave=False):
-
             x_shot, x_query = fs.split_shot_query(
                 data.cuda(), n_train_way, n_train_shot, n_query,
                 ep_per_batch=ep_per_batch)
@@ -183,23 +246,13 @@ def main(config):
                 n_train_way, n_query,
                 ep_per_batch=ep_per_batch).cuda()
 
-            if config['model'] == 'snail':  # only use one selected label_query
-                query_dix = random_state.randint(n_train_way * n_query)
-                label_query = label_query.view(ep_per_batch, -1)[:, query_dix]
-                x_query = x_query[:, query_dix: query_dix + 1]
-
-            if config['model'] == 'maml':  # need grad in maml
-                model.zero_grad()
-
-            (z_e, emb), logits = model(x_shot, x_query)
+            (x, recon_x, z_e, emb), logits = model(x_shot, x_query)
             
             logits = logits.view(-1, n_train_way)
             ce_loss = F.cross_entropy(logits, label_query)
-            vq_loss = F.mse_loss(emb, z_e.detach())
-            commit_loss = F.mse_loss(z_e, emb.detach())
+            vqvae_loss = model.vq_vae.loss_function(x, recon_x, z_e, emb)
             
-            #vq_coef=1, comit_coef=0.5,
-            loss = ce_loss + 1*vq_loss + 0.5*commit_loss
+            loss = ce_loss + 0.5*vqvae_loss
             acc = utils.compute_acc(logits, label_query)
 
             optimizer.zero_grad()
@@ -228,21 +281,11 @@ def main(config):
                 label_query = fs.make_nk_label(
                     n_way, n_query, ep_per_batch=ep_per_batch).cuda()
 
-                if config['model'] == 'snail':  # only use one randomly selected label_query
-                    query_dix = random_state.randint(n_train_way)
-                    label_query = label_query.view(ep_per_batch, -1)[:, query_dix]
-                    x_query = x_query[:, query_dix: query_dix + 1]
-
-                if config['model'] == 'maml':  # need grad in maml
-                    model.zero_grad()
-                    logits = model(x_shot, x_query, eval=True).view(-1, n_way)
+                with torch.no_grad():
+                    (x, recon_x, z_e, emb), logits = model(x_shot, x_query)
+                    logits = logits.view(-1, n_train_way)
                     loss = F.cross_entropy(logits, label_query)
                     acc = utils.compute_acc(logits, label_query)
-                else:
-                    with torch.no_grad():
-                        logits = model(x_shot, x_query, eval=True).view(-1, n_way)
-                        loss = F.cross_entropy(logits, label_query)
-                        acc = utils.compute_acc(logits, label_query)
 
                 aves[name_l].add(loss.item())
                 aves[name_a].add(acc)
@@ -258,7 +301,7 @@ def main(config):
         t_epoch = utils.time_str(timer_epoch.t())
         t_used = utils.time_str(timer_used.t())
         t_estimate = utils.time_str(timer_used.t() / epoch * max_epoch)
-        log_str = 'epoch {}, train {:.4f}|{:.4f}, val {:.4f}|{:.4f}'.format(
+        log_str = 'Meta Baseline Training Stage Epoch {}, train {:.4f}|{:.4f}, val {:.4f}|{:.4f}'.format(
             epoch, aves['tl'], aves['ta'], aves['vl'], aves['va'])
         for tval_name, _, loss_key, acc_key in tval_tuple_lst:
             log_str += ', {} {:.4f}|{:.4f}'.format(tval_name, aves[loss_key], aves[acc_key])
