@@ -25,7 +25,7 @@ from datasets.samplers import BongardSampler
 def main(config):
     svname = args.name
     if svname is None:
-        svname = 'vqmeta3_{}-{}shot'.format(
+        svname = 'vqmeta4_{}-{}shot'.format(
             config['train_dataset'], config['n_shot'])
         svname += '_' + config['model']
         if config['model_args'].get('encoder'):
@@ -164,9 +164,9 @@ def main(config):
     for k in aves_keys:
         trlog[k] = []
         
-    vqvae_optimizer = optim.Adam(model.parameters(), lr=2e-4)
-    vqvae_scheduler = optim.lr_scheduler.StepLR(vqvae_optimizer, 10, 0.5,)
-    vqvae_maxepoch = 10
+    vqvae_optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    vqvae_scheduler = optim.lr_scheduler.StepLR(vqvae_optimizer, 30, 0.5,)
+    vqvae_maxepoch = 5
     
     for epoch in range(1, vqvae_maxepoch + 1):
         # vq vae train
@@ -254,7 +254,7 @@ def main(config):
             ce_loss = F.cross_entropy(logits, label_query)
             vqvae_loss = model.vq_vae.loss_function(x, recon_x, z_e, emb)
             
-            loss = ce_loss + 0.5*vqvae_loss
+            loss = ce_loss + 0.1*vqvae_loss
             acc = utils.compute_acc(logits, label_query)
 
             optimizer.zero_grad()

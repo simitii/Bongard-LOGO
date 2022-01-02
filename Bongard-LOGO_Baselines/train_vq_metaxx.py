@@ -25,7 +25,7 @@ from datasets.samplers import BongardSampler
 def main(config):
     svname = args.name
     if svname is None:
-        svname = 'vqmeta3_{}-{}shot'.format(
+        svname = 'vqmeta_{}-{}shot'.format(
             config['train_dataset'], config['n_shot'])
         svname += '_' + config['model']
         if config['model_args'].get('encoder'):
@@ -163,73 +163,7 @@ def main(config):
     trlog = dict()
     for k in aves_keys:
         trlog[k] = []
-        
-    vqvae_optimizer = optim.Adam(model.parameters(), lr=2e-4)
-    vqvae_scheduler = optim.lr_scheduler.StepLR(vqvae_optimizer, 10, 0.5,)
-    vqvae_maxepoch = 10
-    
-    for epoch in range(1, vqvae_maxepoch + 1):
-        # vq vae train
-        timer_epoch.s()
-        aves = {k: utils.Averager() for k in ['loss', 'mse', 'vq', 'commitment', 'val_loss', 'val_mse', 'val_vq', 'val_commitment']}
-        
-        model.train()
-        if config.get('freeze_bn'):
-            utils.freeze_bn(model)
 
-        for data, label in tqdm(train_loader, desc='vq vae train', leave=False):
-            x_shot, x_query = fs.split_shot_query(
-                data.cuda(), n_train_way, n_train_shot, n_query,
-                ep_per_batch=ep_per_batch)
-
-            (x, recon_x, z_e, emb), logits = model(x_shot, x_query)
-            loss = model.vq_vae.loss_function(x, recon_x, z_e, emb)
-       
-          
-            optimizer.zero_grad()
-            loss.backward()
-            vqvae_optimizer.step()
-            latest_losses = model.vq_vae.latest_losses()
-            
-            aves['loss'].add(loss.item())
-            aves['mse'].add(latest_losses['mse'].item())
-            aves['vq'].add(latest_losses['vq'].item())
-            aves['commitment'].add(latest_losses['commitment'].item())
-           
-        vqvae_scheduler.step()
-        
-        # eval
-        model.eval()
-
-        np.random.seed(0)
-        for data, _ in tqdm(val_loader, desc='vq vae validation', leave=False):
-            x_shot, x_query = fs.split_shot_query(
-                data.cuda(), n_way, n_shot, n_query,
-                ep_per_batch=ep_per_batch)
-            
-            with torch.no_grad():
-                (x, recon_x, z_e, emb), logits = model(x_shot, x_query)
-                loss = model.vq_vae.loss_function(x, recon_x, z_e, emb)
-                latest_losses = model.vq_vae.latest_losses()
-
-                aves['val_loss'].add(loss.item())
-                aves['val_mse'].add(latest_losses['mse'].item())
-                aves['val_vq'].add(latest_losses['vq'].item())
-                aves['val_commitment'].add(latest_losses['commitment'].item())
-                
-        for k, v in aves.items():
-            aves[k] = v.item()
-
-        t_epoch = utils.time_str(timer_epoch.t())
-        t_used = utils.time_str(timer_used.t())
-        t_estimate = utils.time_str(timer_used.t() / epoch * vqvae_maxepoch)
-        log_str =  "VQVAE Training Stage Epoch {},  ".format(epoch)
-        log_str += "Training: [loss: {:.4f}, mse: {:.4f}, vq: {:.4f}, commitment {:.4f}],  ".format(aves['loss'], aves['mse'], aves['vq'], aves['commitment'])
-        log_str += "Validation: [loss: {:.4f}, mse: {:.4f}, vq: {:.4f}, commitment {:.4f}],  ".format(aves['val_loss'], aves['val_mse'], aves['val_vq'], aves['val_commitment'])
-        log_str += '{} {}/{}'.format(t_epoch, t_used, t_estimate)
-        utils.log(log_str)
-    
-    timer_used.s()
     for epoch in range(1, max_epoch + 1):
         timer_epoch.s()
         aves = {k: utils.Averager() for k in aves_keys}
@@ -251,10 +185,7 @@ def main(config):
             (x, recon_x, z_e, emb), logits = model(x_shot, x_query)
             
             logits = logits.view(-1, n_train_way)
-            ce_loss = F.cross_entropy(logits, label_query)
-            vqvae_loss = model.vq_vae.loss_function(x, recon_x, z_e, emb)
-            
-            loss = ce_loss + 0.5*vqvae_loss
+            loss = F.cross_entropy(logits, label_query)
             acc = utils.compute_acc(logits, label_query)
 
             optimizer.zero_grad()
